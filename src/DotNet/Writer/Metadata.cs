@@ -2179,8 +2179,10 @@ namespace dnlib.DotNet.Writer {
 
 		/// <inheritdoc/>
 		public MDToken GetToken(object o) {
-			if (o is IMDTokenProvider tp)
+			if (o is IMDTokenProvider tp) {
+				PatchSelfRef(ref tp);
 				return new MDToken(tp.MDToken.Table, AddMDTokenProvider(tp));
+			}
 
 			if (o is string s)
 				return new MDToken((Table)0x70, usHeap.Add(s));
@@ -2350,6 +2352,27 @@ namespace dnlib.DotNet.Writer {
 			return 0;
 		}
 
+		Dictionary<string, TypeDef> _MyTypes;
+
+		void PatchSelfRef<Ty>(ref Ty r) where Ty : class {
+			if (r is TypeRef tr && tr.DefinitionAssembly.Name == Module.Assembly.Name) {
+				if (_MyTypes == null) {
+					var types = new Dictionary<string, TypeDef>();
+					FillTypeDict(types, Module.Types);
+					_MyTypes = types;
+				}
+
+				if (_MyTypes.TryGetValue(tr.FullName, out var tdef))
+					r = tdef as Ty ?? throw new Exception("Failed to convert TypeDef");
+				else {
+					throw new NotSupportedException();
+				}
+			}
+
+			if (r is ModuleDef md && r != module)
+				r = module as Ty ?? throw new Exception("Failed to convert ModuleDef");
+		}
+
 		/// <summary>
 		/// Adds a <see cref="ITypeDefOrRef"/>
 		/// </summary>
@@ -2361,12 +2384,21 @@ namespace dnlib.DotNet.Writer {
 				return 0;
 			}
 
+			PatchSelfRef(ref tdr);
+
 			var token = new MDToken(tdr.MDToken.Table, AddMDTokenProvider(tdr));
 			if (!CodedToken.TypeDefOrRef.Encode(token, out uint encodedToken)) {
 				Error("Can't encode TypeDefOrRef token 0x{0:X8}.", token.Raw);
 				encodedToken = 0;
 			}
 			return encodedToken;
+		}
+
+		private void FillTypeDict(Dictionary<string, TypeDef> dict, IList<TypeDef> types) {
+			foreach (var ty in types) {
+				dict[ty.FullName] = ty;
+				FillTypeDict(dict, ty.NestedTypes);
+			}
 		}
 
 		/// <summary>
@@ -2378,6 +2410,8 @@ namespace dnlib.DotNet.Writer {
 			if (rs is null) {
 				return 0;
 			}
+
+			PatchSelfRef(ref rs);
 
 			var token = new MDToken(rs.MDToken.Table, AddMDTokenProvider(rs));
 			if (!CodedToken.ResolutionScope.Encode(token, out uint encodedToken)) {
@@ -2417,6 +2451,8 @@ namespace dnlib.DotNet.Writer {
 				return 0;
 			}
 
+			PatchSelfRef(ref parent);
+
 			var token = new MDToken(parent.MDToken.Table, AddMDTokenProvider(parent));
 			if (!CodedToken.MemberRefParent.Encode(token, out uint encodedToken)) {
 				Error("Can't encode MemberRefParent token 0x{0:X8}.", token.Raw);
@@ -2454,6 +2490,8 @@ namespace dnlib.DotNet.Writer {
 				Error("CustomAttributeType is null");
 				return 0;
 			}
+
+			PatchSelfRef(ref cat);
 
 			var token = new MDToken(cat.MDToken.Table, AddMDTokenProvider(cat));
 			if (!CodedToken.CustomAttributeType.Encode(token, out uint encodedToken)) {
@@ -2537,6 +2575,10 @@ namespace dnlib.DotNet.Writer {
 			}
 			if (assemblyRefInfos.TryGetRid(asmRef, out uint rid))
 				return rid;
+
+			if (asmRef.Name == Module.Assembly.Name)
+				throw new InvalidOperationException("Assembly should not reference itself");
+
 			var version = Utils.CreateVersionWithNoUndefinedValues(asmRef.Version);
 			var row = new RawAssemblyRefRow((ushort)version.Major,
 							(ushort)version.Minor,
